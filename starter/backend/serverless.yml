@@ -1,59 +1,229 @@
-service: serverless-todo-app
+# Organization and Application Information
+org: nguyenson
+app: serverless-todo-app-udacity
+service: serverless-todo-app-udacity   # Service or component name
+frameworkVersion: '3'        # Serverless Framework version being used
 
+# Plugins
 plugins:
-  - serverless-iam-roles-per-function
+  - serverless-iam-roles-per-function  # Plugin for fine-grained IAM roles per function
+  - serverless-plugin-tracing           # Plugin for enabling tracing
+  - serverless-reqvalidator-plugin      # Plugin for request validation
+  - serverless-aws-documentation        # Plugin for AWS documentation generation
 
-frameworkVersion: '3'
+# Custom Configuration
+custom:
+  documentation:
+    api:
+      info:
+        version: v1.0.0               # API version
+        title: Todo APP               # Title of the API
+        description: Serverless application Todo app   # Description of the API
+    models:
+      - name: createTodoRequest        # Model for creating a todo request
+        contentType: application/json
+        schema: ${file(model/create-todo-model.json)}
+      - name: updateTodoRequest        # Model for updating a todo request
+        contentType: application/json
+        schema: ${file(model/update-todo-model.json)}
 
+# Provider Configuration (AWS)
 provider:
-  name: aws
-  runtime: nodejs14.x
+  name: aws                     # AWS as the cloud provider
+  runtime: nodejs14.x           # Runtime environment
+  stage: ${opt:stage, 'dev'}    # Deployment stage (default to 'dev')
+  region: ${opt:region, 'us-east-1'}  # AWS region (default to 'us-east-1')
+  profile: default              # AWS authentication profile
+  tracing:
+    lambda: true                # Enable Lambda function tracing
+    apiGateway: true            # Enable API Gateway tracing
+  environment:
+    TODOS_TABLE: todo-app-${self:provider.stage}   # DynamoDB table name
+    TODOS_CREATED_AT_INDEX: CreatedAtIndex         # Secondary index name
+    ATTACHMENT_S3_BUCKET: nguyenson99-todo-app-images-${self:provider.stage}   # S3 bucket name
+    SIGNED_URL_EXPIRATION: 300                      # Expiration time for signed URLs
+    PROJECT_NAME: "todo-app"                       # Project name
+    INDEX_NAME: ${self:provider.environment.TODOS_CREATED_AT_INDEX}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+      Resource:
+        - Fn::GetAtt:
+            - TodosTable
+            - Arn
+  logs:
+    restApi: true              # Enable REST API logging
 
+# Functions
 functions:
-
+  # Auth function for authorization
   Auth:
     handler: src/lambda/auth/auth0Authorizer.handler
 
-  # TODO: Configure this function
+  # GetTodos function for fetching todos
   GetTodos:
     handler: src/lambda/http/getTodos.handler
+    role: GetTodosLambdaRole
     events:
       - http:
           method: get
           path: todos
+          cors: true
+          authorizer: Auth     # Authorization function
 
-  # TODO: Configure this function
+  # CreateTodo function for creating todos
   CreateTodo:
     handler: src/lambda/http/createTodo.handler
+    role: CreateTodoLambdaRole
     events:
       - http:
           method: post
           path: todos
+          cors: true
+          authorizer: Auth     # Authorization function
+          request:
+            schemas:
+              'application/json': ${file(model/create-todo-model.json)}
+          reqValidatorName: RequestBodyValidator  # Request validator for input validation
 
-  # TODO: Configure this function
+  # UpdateTodo function for updating todos
   UpdateTodo:
     handler: src/lambda/http/updateTodo.handler
+    role: UpdateTodoLambdaRole
     events:
       - http:
           method: patch
           path: todos/{todoId}
+          cors: true
+          authorizer: Auth     # Authorization function
+          documentation:
+            summary: Update a new todo
+            description: Update a new todo
+            requestModels:
+              "application/json": updateTodoRequest
+          reqValidatorName: RequestBodyValidator  # Request validator for input validation
 
-  # TODO: Configure this function
-  DeleteTodo:
-    handler: src/lambda/http/deleteTodo.handler
-    events:
-      - http:
-          method: delete
-          path: todos/{todoId}
-
-  # TODO: Configure this function
+  # GenerateUploadUrl function for generating upload URLs
   GenerateUploadUrl:
     handler: src/lambda/http/generateUploadUrl.handler
+    role: GenerateUploadUrlLambdaRole
     events:
       - http:
           method: post
           path: todos/{todoId}/attachment
+          cors: true
+          authorizer: Auth     # Authorization function
 
+  # DeleteTodo function for deleting todos
+  DeleteTodo:
+    handler: src/lambda/http/deleteTodo.handler
+    role: DeleteTodoLambdaRole
+    events:
+      - http:
+          method: delete
+          path: todos/{todoId}
+          cors: true
+          authorizer: Auth     # Authorization function
+
+# Resources
 resources:
   Resources:
-    # TODO: Add any necessary AWS resources
+    # GatewayResponseDefault4XX resource
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS,POST'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+
+    # TodosTable DynamoDB table
+    TodosTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        # Define table attributes and schema
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: todoId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH
+          - AttributeName: todoId
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST   # Use on-demand billing mode
+        TableName: ${self:provider.environment.TODOS_TABLE}  # Table name
+        LocalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.TODOS_CREATED_AT_INDEX}
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL   # Include all attributes in the index
+
+    # AttachmentsBucket S3 bucket
+    AttachmentsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.ATTACHMENT_S3_BUCKET}   # Bucket name
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: ObjectWriter
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          BlockPublicPolicy: false
+          IgnorePublicAcls: false
+          RestrictPublicBuckets: false
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - "*"
+              AllowedHeaders:
+                - "*"
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+
+    # BucketPolicy for allowing public access to the S3 bucket
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: MyPolicy
+          Version: "2012-10-17"
+          Statement:
+            - Sid: PublicReadWriteBucketPolicy
+              Effect: Allow
+              Principal: "*"
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource: "arn:aws:s3:::${self:provider.environment.ATTACHMENT_S3_BUCKET}/*"
+        Bucket: !Ref AttachmentsBucket  # Reference to the S3 bucket
+
+    # RequestBodyValidator for API Gateway request validation
+    RequestBodyValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      Properties:
+        Name: "request-body-validator"
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ValidateRequestBody: true
+        ValidateRequestParameters: false
